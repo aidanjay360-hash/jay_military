@@ -1,8 +1,6 @@
-import sys
-import re
-import requests
-from bs4 import BeautifulSoup
+import time
 from playwright.sync_api import sync_playwright
+
 
 YES_WORDS = [
     "study", "research", "scientists", "experts", "officials",
@@ -17,37 +15,25 @@ NO_WORDS = [
 ]
 
 
-def get_article_text(url):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers, timeout=15)
-    r.raise_for_status()
+def decide_yes_no(page_text):
+    text = page_text.lower()
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    yes_score = sum(1 for word in YES_WORDS if word in text)
+    no_score = sum(1 for word in NO_WORDS if word in text)
 
-    for tag in soup(["script", "style", "nav", "footer", "header"]):
-        tag.decompose()
+    print(f"YES score: {yes_score} | NO score: {no_score}")
 
-    text = " ".join(soup.get_text(" ").split())
-    return text[:8000]
-
-
-def decide_yes_no(text):
-    text_lower = text.lower()
-
-    yes_score = sum(1 for word in YES_WORDS if word in text_lower)
-    no_score = sum(1 for word in NO_WORDS if word in text_lower)
-
-    print(f"YES score: {yes_score}")
-    print(f"NO score: {no_score}")
-
-    return "Yes" if yes_score >= no_score else "No"
+    if yes_score >= no_score:
+        return "Yes"
+    else:
+        return "No"
 
 
 def click_answer(page, answer):
     selectors = [
-        f"text={answer}",
         f"label:has-text('{answer}')",
         f"button:has-text('{answer}')",
+        f"text={answer}",
         f"input[value='{answer}']"
     ]
 
@@ -64,11 +50,12 @@ def click_answer(page, answer):
 
 def click_next(page):
     selectors = [
-        "text=Next",
         "button:has-text('Next')",
         "input[value='Next']",
-        "text=Submit",
-        "button:has-text('Submit')"
+        "text=Next",
+        "button:has-text('Submit')",
+        "input[value='Submit']",
+        "text=Submit"
     ]
 
     for selector in selectors:
@@ -82,39 +69,58 @@ def click_next(page):
     return False
 
 
+def survey_done(page):
+    text = page.inner_text("body").lower()
+
+    done_phrases = [
+        "thank you",
+        "your response has been recorded",
+        "survey complete",
+        "submitted"
+    ]
+
+    return any(phrase in text for phrase in done_phrases)
+
+
 def main():
-    if len(sys.argv) < 2:
-        print('Usage: python qualtrics_automator_no_ai.py "ARTICLE_URL"')
-        sys.exit(1)
-
-    article_url = sys.argv[1]
-
-    print("Reading article...")
-    article_text = get_article_text(article_url)
-
-    answer = decide_yes_no(article_text)
-    print(f"Chosen answer: {answer}")
-
-    survey_url = input("Paste the Qualtrics survey URL: ").strip()
+    survey_url = input("Paste Qualtrics survey URL: ").strip()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         page = browser.new_page()
         page.goto(survey_url)
 
-        input("Press Enter once the survey page is loaded...")
+        input("Press Enter once the first article/question is loaded...")
 
-        if not click_answer(page, answer):
-            print("Could not click Yes/No. Saving screenshot.")
-            page.screenshot(path="survey_debug.png")
-            return
+        question_number = 1
 
-        if not click_next(page):
-            print("Could not click Next. Saving screenshot.")
-            page.screenshot(path="survey_debug.png")
-            return
+        while True:
+            time.sleep(2)
 
-        print("Done.")
+            if survey_done(page):
+                print("Survey looks complete.")
+                break
+
+            print(f"\n--- Question/Page {question_number} ---")
+
+            page_text = page.inner_text("body")
+            answer = decide_yes_no(page_text)
+            print(f"Chosen answer: {answer}")
+
+            if not click_answer(page, answer):
+                print("Could not click Yes/No. Saving screenshot.")
+                page.screenshot(path=f"survey_debug_{question_number}.png")
+                break
+
+            time.sleep(1)
+
+            if not click_next(page):
+                print("Could not click Next/Submit. Saving screenshot.")
+                page.screenshot(path=f"survey_debug_{question_number}.png")
+                break
+
+            question_number += 1
+
         input("Press Enter to close browser...")
         browser.close()
 
